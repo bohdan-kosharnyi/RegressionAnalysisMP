@@ -1,0 +1,719 @@
+---
+title: "Analiza zbioru danych graczy NBA"
+author: "Kosharnyi Bohdan"
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Analiza zbioru danych graczy NBA"
+    self-contained: true
+    error: false
+    echo: false
+    warning: false
+    message: false
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(knitr)
+library(PerformanceAnalytics)
+library(tidyverse)
+library(flextable)
+library(gridExtra)
+library(stats)
+library(caret)
+library(olsrr)
+library(GGally)
+library(ggplot2)
+library(tidyr)
+library(ggfortify)
+library(see)
+library(performance)
+library(patchwork)
+library(nortest)
+library(dplyr)
+library(GGally)
+library(car)
+library(lmtest)
+library(nortest)
+library(ggcorrplot)
+library(latex2exp)
+library(quantreg)
+library(robustbase)
+library(sandwich)
+library(earth)
+library(caTools)
+library(Metrics)
+```
+
+# Wstęp
+
+Celem projektu jest wyznaczenie zależności pomiędzy tym, ile zawodnik średnio spędza minut na boisku za męcz, a innymi zmiennymi ze zbioru danych, zawierającego statystyki graczy NBA (ang. National Basketball Association) od roku 1991 do 2021. Zbiór zawiera 18044 obserwacji, czyli jest to suma zawodników, które brali udział w meczach NBA za te lata (nie jest liczba unikalnych graczy, ich - 540) oraz 31 statystykę. Wprowadźmy do zbioru zmienną *ID*, za pomocą której przekształcimy nasz zbiór w taki sposób, że będzie on zawierał średnie statystyki zdobyte koszykarzami za męcz wzdłuż ich kariery.
+
+```{r}
+dane <- read.csv2("C:/analiza_danych/players.csv", header=T, sep=";")
+
+position_map <- c("PG"=1, "SG"=2, "SF"=3, "PF"=4, "C"=5)
+dane$Pos <- as.numeric(factor(dane$Pos, levels=names(position_map)))
+
+numeric_columns <- c("Pos", "Age", "G", "GS", "MP", "FG", "FGA", "FG.", "X3P", "X3PA", "X3P.", "X2P", "X2PA", "X2P.", "eFG.", "FT", "FTA", "FT.", "ORB", "DRB", "TRB", "AST", "STL", "BLK", "TOV", "PF", "PTS")
+dane[numeric_columns] <- lapply(dane[numeric_columns], as.numeric)
+
+bd <- sum(is.na(dane))
+d <- na.omit(dane)
+
+
+da <- d[c(-1,-5,-31)] |>
+  group_by(Player)|>
+  mutate(ID=cur_group_id())
+
+dane1 <- da[-1]
+dd <- aggregate(dane1,list(dane1$ID),FUN=mean)
+data <- dd[-1]
+
+
+data$Pos <- factor(round(data$Pos), levels=c(1, 2, 3, 4, 5), 
+                   labels=c("PG", "SG", "SF", "PF", "C"))
+
+```
+
+Otrzymaliśmy taki zbiór danych:
+
+```{r}
+data|>
+  head()|>
+  flextable()|>
+  colformat_double(j=1:27,digits = 2)|>
+  style()|>
+  autofit()
+
+```
+
+# Budowanie Modelu liniowego
+
+Najpierw zbudujemy macierz korelacji, żeby nie wprowadzić skorelowane między sobą zmienne do modelu.
+
+```{r}
+ggcorrplot::ggcorrplot(cor(data[c(-1,-28)]),lab=T)
+```
+
+Age, G, X3P, X2P, eFG., DRB, STL - zmienne, które będą wchodzić do modelu pełnego.
+
+A teraz za pomocą funkcji *step* znajdziemy najlepszy model według kryteria AIC.
+
+```{r}
+
+df <- data[c(2,3,5,9,12,15,20,23,28)]
+md_f <- lm(MP~.,df[-10])
+md0 <- lm(MP~1,df[-10])
+
+model <- step(md0,
+              scope=list(lower=md0,upper=md_f),
+              direction="forward",
+              trace=0)
+
+```
+
+Dopasowany model ma postać: $$ MP \sim \displaystyle\beta_0 + \beta_1 \cdot X2P + \beta_2 \cdot X3P + \beta_3 \cdot STL +\beta_4 \cdot G + \beta_5 \cdot DRB + \beta_6 \cdot Age + \beta_6 \cdot eFG. + \varepsilon $$ Współczynnik determinacji $R^2$ wynosi $0.927$ i wpływ wszystkich zmiennych, oprócz współczynnika wolnego, jest istotny.
+
+Zbudujemy wykresy diagnostyczne modelu.
+
+```{r}
+check_model(model)
+```
+
+Z powyższych wykresów widzimy, że nie występuje nadmiarowość zmiennych modelu, charakter zależność pomiędzy predyktorami a *MP* jest nieliniowy oraz reszty modelu nie są normalne. A zatem spróbujmy transformować zmienne modelu.
+
+## Transformacja zmiennych
+
+Narysujemy wykresy zależności pomiędzy predyktorami modelu oraz zmienną objaśnianą.
+
+```{r}
+w1 <- ggplot(data=df,mapping=aes(x=X2P,y=MP))+
+  geom_point(col="red")+
+  geom_smooth(col="black")
+w2 <- ggplot(data=df,mapping=aes(x=X3P,y=MP))+
+  geom_point(col="blue")+
+  geom_smooth(col="black")
+w3 <- ggplot(data=df,mapping=aes(x=STL,y=MP))+
+  geom_point(col="green")+
+  geom_smooth(col="black")
+w4 <- ggplot(data=df,mapping=aes(x=G,y=MP))+
+  geom_point(col="orange")+
+  geom_smooth(col="black")
+w5 <- ggplot(data=df,mapping=aes(x=DRB,y=MP))+
+  geom_point(col="purple")+
+  geom_smooth(col="black")
+w6 <- ggplot(data=df,mapping=aes(x=Age,y=MP))+
+  geom_point(col="pink")+
+  geom_smooth(col="black")
+w7 <- ggplot(data=df,mapping=aes(x=eFG.,y=MP))+
+  geom_point(col="yellow")+
+  geom_smooth(col="black")
+
+grid.arrange(w1,w2,w3,w4,w5,w6,w7)
+```
+
+Najpierw spróbujemy zlogarytmować wszystkie zmienne modelu.
+
+```{r}
+data2 <- NULL
+
+data2$MP <- log(df$MP+1)
+data2$X3P <- log(df$X3P+1)
+data2$X2P <- log(df$X2P+1)
+data2$STL <- log(df$STL+1)
+data2$DRB <- log(df$DRB+1)
+data2$Age <- log(df$Age+1)
+data2$G <- log(df$G+1)
+data2$eFG. <- log(df$eFG.+1)
+data2 <- data.frame(data2)
+mod <- lm(MP~.,data2)
+```
+
+Wykresy diagnostyczne dla modelu po zlogarytmowaniu wszystkich zmiennych będą miały następującą postać:
+
+```{r}
+autoplot(mod,which=1:6)
+```
+
+Takie transformacji nie polepszyli modelu, a zatem zastosujmy transformacje *Yeo-Johnsona* do naszych zmiennych objaśniających.
+
+```{r}
+data1 <- NULL
+
+bc <- powerTransform(cbind(data$Age, data$X3P, data$X2P, data$eFG.,
+                           data$DRB, data$STL, data$G)~1,
+                     family = "yjPower")
+lam <- coef(bc,round = T)
+
+data1$Age <- yjPower(data$Age,lambda = lam[1])
+data1$X3P <- yjPower(data$X3P,lambda = -2)
+data1$X2P <- yjPower(data$X2P,lambda = -0.5)
+data1$eFG. <- yjPower(data$eFG.,lambda =lam[4])
+data1$DRB <- yjPower(data$DRB,lambda = -1/5)
+data1$STL <- yjPower(data$STL,lambda = -4/5)
+data1$G <- yjPower(data$G,lambda=1)
+
+data1$ID <- data$ID
+data1$MP <- data$MP
+data1 <- data.frame(data1)
+
+mod <- lm(MP~.,data=data1[-8])
+
+```
+
+Wykresy diagnostyczne modelu po transformacji zmiennych objaśniających.
+
+```{r}
+autoplot(mod,which = 1:6)
+```
+
+Oczywistym jest fakt, że postać zależności pomiędzy zmienną *PTS* a naszymi predyktorami nie jest liniowa. Poprawimy to transformując *PTS*, już wspomnianą, transforamcją *Yeo-Johnsona*, ale przed tym znajdziemy współczynnik transformacji $\lambda$ za pomocą poniższego wykresu.
+
+```{r}
+inverseResponsePlot(mod, family="yjPower")
+```
+
+Z powyższego wykresu widzimy, że współ czynnik transformacji $\lambda =0.5111491$, co w "przybliżeniu" uznamy za $\frac{1}{2}$.
+
+```{r}
+data1$MP <- (data1$MP)^(1/2)
+```
+
+Sprawdzimy, jak po transformacji zmiennej *MP* wyglądają wykresy diagnostyczne modelu.
+
+```{r}
+mod1 <- lm(MP~.,data=data1[-8])
+autoplot(mod1,which = 1:6)
+```
+
+Nadal widzimy, że rozkład reszt może być istotnie różny od normalnego.
+
+## Odporne Estematory White'a
+
+Zastosujmy do modelu z transformowanymi zmiennymi odporne estymatory White'a.
+
+```{r}
+hco <- hccm(model = mod1,type = "hc0")
+md_hco <- coeftest(mod1,vcov. = hco)
+md_hco
+
+```
+
+Wszystkie zmienne z nowymi, bardziej efektywnymi estymatorami, są istotne.
+
+## Wartości odstające
+
+Obserwacji mające duży wpływ na współczynniki modelu:
+
+```{r}
+n <- nrow(data1)
+b1 <- data.frame(dfbetas(mod1)[abs(dfbetas(mod1))[,1]>2/sqrt(n),1])
+b2 <- data.frame(dfbetas(mod1)[abs(dfbetas(mod1))[,2]>2/sqrt(n),2])
+b3 <- data.frame(dfbetas(mod1)[abs(dfbetas(mod1))[,3]>2/sqrt(n),3])
+b4 <- data.frame(dfbetas(mod1)[abs(dfbetas(mod1))[,4]>2/sqrt(n),4])
+b5 <- data.frame(dfbetas(mod1)[abs(dfbetas(mod1))[,5]>2/sqrt(n),5])
+b6 <- data.frame(dfbetas(mod1)[abs(dfbetas(mod1))[,6]>2/sqrt(n),6])
+b7 <- data.frame(dfbetas(mod1)[abs(dfbetas(mod1))[,7]>2/sqrt(n),7])
+b8 <- data.frame(dfbetas(mod1)[abs(dfbetas(mod1))[,8]>2/sqrt(n),8])
+#b9 <- data.frame(dfbetas(mod1)[abs(dfbetas(mod1))[,9]>2/sqrt(n),9])
+
+
+takie_same <- subset(rownames(b1),
+                     rownames(b1)[1:length(rownames(b1))] %in% rownames(b2)
+                     &rownames(b1)[1:length(rownames(b1))] %in% rownames(b3)
+                     &rownames(b1)[1:length(rownames(b1))] %in% rownames(b4)
+                     &rownames(b1)[1:length(rownames(b1))] %in% rownames(b5)
+                     &rownames(b1)[1:length(rownames(b1))] %in% rownames(b6)
+                     &rownames(b1)[1:length(rownames(b1))] %in% rownames(b7)
+                     &rownames(b1)[1:length(rownames(b1))] %in% rownames(b8))
+
+dfb_wsz <- data.frame(
+   takie_same,
+   b1[takie_same,],
+   b2[takie_same,],
+   b3[takie_same,],
+   b4[takie_same,],
+   b5[takie_same,],
+   b6[takie_same,],
+   b7[takie_same,],
+   b8[takie_same,],
+   #b9[takie_same,],
+   check.names = F)|>
+    flextable() |> 
+    colformat_double(j = 2:7, digits = 3) |> 
+    mk_par(j=1,part = "header",value = as_paragraph("Numer obserwacji"))|>
+    mk_par(j = 2, part = "header", value = as_paragraph(as_i("β"), as_sub("0")))|> 
+    mk_par(j = 3, part = "header", value = as_paragraph(as_i("β"), as_sub("1")))|> 
+    mk_par(j = 4, part = "header", value = as_paragraph(as_i("β"), as_sub("2")))|>
+    mk_par(j = 5, part = "header", value = as_paragraph(as_i("β"), as_sub("3")))|>
+    mk_par(j = 6, part = "header", value = as_paragraph(as_i("β"), as_sub("4")))|> 
+    mk_par(j = 7, part = "header", value = as_paragraph(as_i("β"), as_sub("5")))|>  
+    mk_par(j = 8, part = "header", value = as_paragraph(as_i("β"), as_sub("6")))|> 
+    mk_par(j = 9, part = "header", value = as_paragraph(as_i("β"), as_sub("7")))|> 
+    autofit()
+dfb_wsz
+```
+
+Obserwacji o dużej dźwigni i resztach standaryzowanych:
+
+```{r}
+ols_plot_resid_lev(mod1)
+```
+
+Obserwacji o dużej odległości Cooka:
+
+```{r}
+ols_plot_cooksd_chart(mod1)
+```
+
+Rozpatrywany zbiór raczej nie ma obserwacji odstających, bo mimo tego, że istnieją obserwacji o dużej dźwigni i dużym wpływie ma współczynniki modelu, nie są one błędem wprowadzania danych, po prostu model jest zły, w sensie opisu tego zjawiska.
+
+## Testy diagnostyczne
+
+Mimo tego, że na wykresach diagnostycznych możemy odczytać nie spełnienie niektórych założeń, sprawdzimy to testami. Model liniowy ma spełniać następujące założenia:
+
+1.  Charakter zależności musi być liniowy.
+2.  $E(\varepsilon|X_i)\neq 0$.
+3.  $Var(\varepsilon|X_i)\neq \sigma^2$.
+4.  $Cov(\varepsilon_i,\varepsilon_j)\neq 0$.
+5.  Predyktory wykazują nadmiarowość (redundancja, współliniowość).
+6.  Próba na podstawie, której estymujemy model nie jest reprezentatywna. 6.Rozkład błędów dopasowania nie jest normalny.
+7.  Model zawiera jedną lub więcej obserwacji odstających.
+8.  Liczba predyktorów przekracza liczbę obserwacji.
+
+### Normalonść rozkładu reszt
+
+```{r}
+n1 <- lillie.test(resid(mod1))
+n2 <- ad.test(resid(mod1))
+
+n <- data.frame(rbind(round(n1$p.value,4),round(n2$p.value,4)))
+n <- cbind(c("Lilliefors","Anderson-Darling"),n)
+colnames(n) <- c("Test","p-value")
+n|>
+  flextable()|>
+  style()|>
+  autofit()
+```
+
+Test Lillieforsa i test Andersona-Darlinga odrzucają hipotezę o normalności reszt. Ale zbiór, na którym był zbudowany model, zawiera $2674$ obserwacji, co oznacza, że nawet przy użyciu testów zakładających normalność rozkładu, mając tak dużą liczebność próby możemy odpuszczić tą założenie ze względu na to, że dla testów zbiór będzie się zachowywał asymptotycznie normalnie.
+
+### Jednorodność wariancji
+
+```{r}
+j1 <- bptest(mod1)
+j2 <- bptest(mod1,varformula = ~Age+X3P+X2P+eFG.+G+DRB+STL+
+         I(Age^2)+I(X3P^2)+I(X2P^2)+I(eFG.^2)+I(G^2)+I(DRB^2)+I(STL^2),
+         data=data1)
+j3 <- gqtest(mod1,order.by = ~fitted(mod1))
+j4 <- hmctest(mod1,order.by = ~fitted(mod1))
+
+
+j <- data.frame(rbind(round(j1$p.value,4),
+                      round(j2$p.value,4),
+                      round(j3$p.value,4),
+                      round(j4$p.value,4)))
+j <- cbind(c("Breusch-Pagan","White","Goldfeld-Quandt","Harrison-McCabe"),j)
+colnames(j) <- c("Test","p-value")
+j|>
+  flextable()|>
+  style()|>
+  autofit()
+```
+
+Test Breuscha-Pagana, test Whitea odrzucają hipotezę o jednorodności wariancji, ale korzystając z odpornych estymatorów White'a możemy załatwić ten problem.
+
+### Seryjna korelacja reszt
+
+```{r}
+a1 <- dwtest(mod1)
+a2 <- bgtest(mod1,order=2)
+a3 <- bgtest(mod1,order=3)
+a4 <- bgtest(mod1,order=4)
+
+a <- data.frame(rbind(round(a1$p.value,4),
+                      round(a2$p.value,4),
+                      round(a3$p.value,4),
+                      round(a4$p.value,4)))
+a <- cbind(c("Durbin-Watson",
+             "Breusch-Godfrey rzędu 2",
+             "Breusch-Godfrey rzędu 3",
+             "Breusch-Godfrey rzędu 4"),a)
+colnames(a) <- c("Test","p-value")
+a|>
+  flextable()|>
+  style()|>
+  autofit()
+```
+
+Według testu Durbina-Watsona występuje seryjna autokorelacja reszt rzędu większego od $0$ oraz według testu Breuscha-Godfreya występuje seryjna autokorelacja reszt rzędu $2,3$.
+
+### Liniowy ksztalt zależności
+
+```{r}
+l1 <- resettest(mod1,poewr=2:3,type = "regressor")
+l2 <- raintest(mod1)
+l3 <- harvtest(mod1)
+
+l <- data.frame(rbind(round(l1$p.value,4),round(l2$p.value,4),round(l3$p.value,4)))
+l <- cbind(c("RESET","Rainbow","Harvey-Collier"),l)
+colnames(l) <- c("Test","p-value")
+l|>
+  flextable()|>
+  style()|>
+  autofit()
+```
+
+Test RESET Ramseya odrzucaja hipotezę o liniowej postaci zależności pomiędzy zmienną *MP* a predyktorami, ale jest to spowodowane szybką rosnącą mocą testu, czyli trzeba było by sprawdzić, czy zmienią się wyniki testu dla $200$ obserwacji wylosowanych z całej próby.
+
+```{r}
+set.seed(1)
+ind <- sample(nrow(data1),size = 200)
+dat <- data1[ind,]
+
+model1 <- lm(formula = mod1,dat)
+ll1 <- resettest(model1,poewr=2:3,type = "regressor")
+
+ll <- data.frame(rbind(round(ll1$p.value,4)))
+ll <- cbind("RESET",ll)
+colnames(ll) <- c("Test","p-value")
+ll|>
+  flextable()|>
+  style()|>
+  autofit()
+```
+
+Jak widzimy test RESET Ramseya nie wykazuje podstaw do odrzucenia hipotezy o liniowej postaci zależności.
+
+Podsumowując wyniki testów i wykresów diagnostycznych widzimy, że zbudowany model nie spełnia wszystkich założeń modelu liniowego, ale to najlepszy model z przestrzeni modeli liniowych, opisujący tą zależność.
+
+# Predykcja modelu
+
+Zobaczymy jak dobrą predykcje możemy zrobić na podstawie zbudowanego modelu. Badamy to na innym zbiorze, który zawiera w sobie statystyki ukraińskich koszykarze.
+
+```{r}
+newdane <- read.csv2("C:/analiza_danych/players_stats_by_season_full_details.csv", header = T, sep=",")
+
+newdane <- newdane[newdane$League=="Ukrainian-Superleague",]
+
+newdane$Season <- gsub(" - .*", "", newdane$Season)
+
+numeric_columns <- c("GP", "MIN", "FGM", "FGA", "X3PM", "X3PA", "FTM", "FTA", "ORB", "BLK", "height_cm", "weight_kg", "birth_year")
+newdane[numeric_columns] <- lapply(newdane[numeric_columns], as.numeric)
+
+
+ndane1 <- newdane[c(2,4,6:23,27,29)]
+
+
+bd <- sum(is.na(ndane1))
+nd <- na.omit(ndane1)
+
+nd|>
+  head()|>
+  flextable()|>
+  style()|>
+  autofit()
+
+```
+
+```{r}
+nd$Season <- as.numeric(nd$Season)
+nd$Age <- nd$Season-nd$birth_year
+
+
+nda <- na.omit(nd)|>
+  group_by(Player)|>
+  mutate(ID = cur_group_id())
+
+ndd <- nda[c(-2,-1,-20)]
+ndd <- aggregate(ndd,list(ndd$ID),FUN = mean)
+ndata <- ndd[-1]
+
+ndata$PTS <- ndata$PTS/ndata$GP
+ndata$FG <- ndata$FGM/ndata$GP
+ndata$FGA <- ndata$FGA/ndata$GP
+ndata$X3P <- ndata$X3PM/ndata$GP
+ndata$X3P. <- ndata$X3PM/ndata$X3PA
+ndata$FT <- ndata$FTM/ndata$GP
+ndata$FT. <- ndata$FTM/ndata$FTA
+ndata$eFG. <- (ndata$FG+(0.5*ndata$X3P))/ndata$FGA
+ndata$G <- ndata$GP
+ndata$DRB <- ndata$DRB/ndata$GP
+ndata$BLK <- ndata$BLK/ndata$GP
+ndata$MP <- ndata$MIN/ndata$GP
+ndata$X2P <- (ndata$FGM-ndata$X3PM)/ndata$GP
+ndata$X2PA <- ndata$FGA-(ndata$X3PA/ndata$GP)
+ndata$STL <- ndata$STL/ndata$GP
+ndata$TOV <- ndata$TOV/ndata$GP
+
+
+ndata$X3P.[is.na(ndata$X3P.)] <- 0
+
+
+nnd <- ndata[c(12,15,20,23,27,28,29,30)]
+
+
+
+nndd <- NULL
+
+nndd$Age <- yjPower(nnd$Age,lambda = lam[1])
+nndd$X3P <- yjPower(nnd$X3P,lambda = -2)
+nndd$X2P <- yjPower(nnd$X2P,lambda = -0.5)
+nndd$eFG. <- yjPower(nnd$eFG.,lambda =lam[4])
+nndd$DRB <- yjPower(nnd$DRB,lambda = -1/5)
+nndd$STL <- yjPower(nnd$STL,lambda = -4/5)
+nndd$G <- yjPower(nnd$G,lambda=1)
+
+nndd <- data.frame(nndd)
+```
+
+Żeby sprawdzić jak dobrą predykcje ma nasz model, zbudujmy tabele, zawierającą wartość dopasowaną z modelu oraz wartość prawdziwą ze zbioru.
+
+```{r}
+
+pr1 <- predict(object=mod1,
+               newdata=nndd,
+               interval="predict")
+
+data.frame(cbind(rownames(pr1),round((pr1)^(2),3),round(nnd$MP,3)))[1:10,]|>
+  flextable()|>
+  set_header_labels(values=list(V1="Obserwacja",
+                                fit="Wartość dopasowana z modelu",
+                                lwr="Lewy koniec",
+                                upr="Prawy koniec",
+                                V5="Wartość ze zbioru"))|>
+  set_caption("Predykcja modelu liniowego")|>
+  autofit()
+
+
+
+```
+
+Z powyższej tabeli widzimy, że predykcja modelu liniowego jest dość dobra. Ten fakt zwizualizujemy.
+
+```{r}
+
+
+ggplot(data=nnd,aes((pr1[,1])^(2),MP))+
+  geom_point(col="red", pch=19)+
+  geom_abline(intercept=0, slope=1,col="blue",lwd=1)+
+  xlab("Predykcja modelu")+
+  ylab("Wartość ze zbioru")+
+  ggtitle("Wykres predykcji")
+
+```
+
+Możemy zauważyć, że na dole model niedoszacowuje wartości, a na górze przeszacowuje, ale to tylko model liniowy, więc można było spodziewać się tego.
+
+# Interpretacja
+
+Wzrost zmiennej $\left(1-(Age+1)^{-1}\right)^{2}$ na 1 powoduje wzrost *MP* na $15.4^{2} = 237.16$.
+
+Wzrost zmiennej $\left(\frac{(1-(X3P+1)^{-2})}{2}\right)^{2}$ na 1 powoduje wzrost *MP* na $1.727^{2} = 2.982529$.
+
+Wzrost zmiennej $\left(2(1-(1-X2P)^{-\frac{1}{2}})\right)^{2}$ na 1 powoduje wzrost *MP* na $1.499^{2} = 2.247001$.
+
+Wzrost zmiennej $eFG.^{2}$ na 1 powoduje spadek *MP* na $0.808^{2} = 0.652864$.
+
+Wzrost zmiennej $\left(5(1-(1-DRB)^{-\frac{1}{5}})\right)^{2}$ na 1 powoduje wzrost *MP* na $0.8839^{2} = 0.7812792$.
+
+Wzrost zmiennej $\left(\frac{5(1-(STL-1)^{-\frac{4}{5}})}{4}\right)^{2}$ na 1 powoduje wzrost *MP* na $1.23^{2} = 1.5129$.
+
+Wzrost zmiennej $G^{2}$ na 1 powoduje spadek *MP* na $0.005185^{2} = 0.00002688423$.
+
+# Inne modeli
+
+## Regresja MARS
+
+Multivariate Adaptive Regression Splines (MARS) jest procedurą nieparametryczną, nie wymagającą założeń na temat funkcyjnej zależności między zmiennymi zależnymi, a niezależnymi. MARS modeluje tę zależność za pomocą zbioru współczynników i funkcji bazowych, "wyprowadzanych" wyłącznie z danych. Otóż, przestrzeń wejściowa dzielona jest na obszary, w których określane są osobne funkcje regresyjne lub klasyfikacyjne. Takie podejście czyni MARS szczególnie użytecznym przy większej liczbie wymiarów na wejściu (więcej niż dwie zmienne), kiedy, w przypadku innych technik zagrażać zaczyna problem wymiarowości. Dopasujmy regresje MARS do zbioru bez transformacji.
+
+```{r}
+mod_mars <- earth(MP ~ X2P + X3P + G + STL + DRB + Age + eFG.,
+                  data = df)
+
+plot(mod_mars)
+
+```
+
+Sprawdźmy predykcje otrzymanego modelu.
+
+```{r}
+prm <- predict(mod_mars,nnd,type="earth")
+
+data.frame(cbind(1:307,round((prm[,1]),3),round(nnd$MP,3)))[1:10,]|>
+  flextable()|>
+  set_header_labels(values=list(X1="Obserwacja",
+                                X2="Wartość dopasowana z modelu",
+                                X3="Wartość ze zbioru"))|>
+  set_caption("Predykcja regresji splajnowej")|>
+  autofit()
+```
+
+Predykcja tego modelu nie jest lepsza od modelu z transformowanymi zmiennymi, ale interpretacja jest bardzo łatwiejsza.
+
+### Interpretacja
+
+```{r}
+summary(mod_mars)
+```
+
+Podsumowanie tego modelu interpretujemy w następujący sposób:
+
+Jeżeli gracz rzuca mniej niż $2.689$ skutecznych 2-punktowych rzutów za męcz, to wzrost zmiennej *X2P* na $1$ powoduje spadek *MP* (minut na boisku) na $2.979$.
+
+Jeżeli gracz rzuca więcej niż $2.689$ skutecznych 2-punktowych rzutów za mecz, to wzrost zmiennej *X2P* na $1$ powoduje wzrost *MP* (minut na boisku) na $1.65$.
+
+Jeżeli gracz rzuca mniej niż $1.212$ skutecznych 3-punktowych rzutów za mecz, to wzrost zmiennej *X3P* na $1$ powoduje spadek *MP* (minut na boisku) na $4.84$.
+
+Jeżeli gracz rzuca więcej niż $1.212$ skutecznych 3-punktowych rzutów za mecz, to wzrost zmiennej *X3P* na $1$ powoduje wzrost *MP* (minut na boisku) na $1.64$.
+
+Jeżeli gracz gra więcej niż $1.75$ mecze za sezon, to wzrost zmiennej *G* na $1$ powoduje wzrost *MP* na $3.65$.
+
+Jeżeli gracz gra mniej niż $25.5$ mecze za sezon, to wzrost zmiennej *G* na $1$ powoduje wzrost *MP* na $3.66$.
+
+Jeżeli gracz gra więcej niż $25.5$ mecze za sezon, to wzrost zmiennej *G* na $1$ powoduje spadek *MP* na $3.65$.
+
+Jeżeli gracz robi mniej niż $0.73$ przechwyty za mecz, to wzrost zmiennej *STL* na 1 powoduje spadek *MP* na $5.33$.
+
+Jeżeli gracz robi więcej niż $0.73$ przechwyty za mecz, to wzrost zmiennej *STL* na 1 powoduje wzrost *MP* na $3.12$.
+
+Jeżeli gracz robi mniej niż $2.25$ zbiórki za mecz, to wzrost zmiennej *STL* na 1 powoduje spadek *MP* na $2.16$.
+
+Jeżeli gracz robi więcej niż $2.25$ zbiórki za mecz, to wzrost zmiennej *STL* na 1 powoduje wzrost *MP* na $0.85$.
+
+Jeżeli gracz ma mniej niż $31$ lat, to wzrost zmiennej *Age* na 1 powoduje spadek *MP* na $0.168$.
+
+Jeżeli gracz ma więcej niż $31$ lat, to wzrost zmiennej *Age* na 1 powoduje spadek *MP* na $0.133$.
+
+Jeżeli gracz ma mniejszą niż $0.298$ efektywność rzutów ($eFG. = \frac{FG+0.5 \cdot X3P}{FGA}$), to wzrost zmiennej *eFG.* na 1 powoduje spadek *MP* na $4.62$.
+
+Jeżeli gracz ma większą niż $0.298$ efektywność rzutów, to wzrost zmiennej *eFG.* na 1 powoduje spadek *MP* na $6.87$.
+
+## Regresja kwantylowa
+
+Regresja kwantylowa modeluje relację między zbiorem predyktorów (zmiennych niezależnych) i konkretnych centyli (lub kwantyli) zmiennej przewidywanej (zależnej), najczęściej medianę. Ma dwie główne przewagi nad zwykłą regresją metodą najmniejszych kwadratów:
+
+-W regresji kwantylowej nie przyjmuje się żadnych założeń dotyczących rozkładu zmiennej przewidywanej.
+
+-Regresja kwantylowa jest odporna na wpływy obserwacji odstających.
+
+Spróbujmy dopasować regresje kwantylową i sprawdzić ją predykcje.
+
+```{r}
+modrq <- rq(formula=model,data=df,tau=seq(0.1, 0.9, by=0.1))
+
+
+pr <- predict(modrq,nnd,interval="predict",type = "Fhat")
+
+data.frame(cbind(rownames(pr),round(pr,3),round(nnd$MP,3)))[1:10,]|>
+  flextable()|>
+  set_header_labels(values=list(V1="Obserwacja",
+                                tau..0.1="Kwantyl 10%",
+                                tau..0.2="Kwantyl 20%",
+                                tau..0.3="Kwantyl 30%",
+                                tau..0.4="Kwantyl 40%",
+                                tau..0.5="Kwantyl 50%",
+                                tau..0.6="Kwantyl 60%",
+                                tau..0.7="Kwantyl 70%",
+                                tau..0.8="Kwantyl 80%",
+                                tau..0.9="Kwantyl 90%",
+                                V11="Wartość ze zbioru"))|>
+  set_caption("Predykcja regresji kwantylowej")|>
+  autofit()
+```
+
+Narysujmy wykres predykcji regresji kwantylowej.
+
+```{r}
+
+ggplot()+
+  geom_point(aes(x=pr[,1],y=nnd$MP),col="red", pch=19)+
+  geom_smooth(method=lm,aes(x=pr[,1],y=nnd$MP), col="blue",lwd=1)+
+  geom_smooth(method=lm,aes(x=pr[,2],y=nnd$MP), col="blue",lwd=1)+
+  geom_smooth(method=lm,aes(x=pr[,3],y=nnd$MP), col="blue",lwd=1)+
+  geom_smooth(method=lm,aes(x=pr[,4],y=nnd$MP), col="blue",lwd=1)+
+  geom_smooth(method=lm,aes(x=pr[,5],y=nnd$MP), col="blue",lwd=1)+
+  geom_smooth(method=lm,aes(x=pr[,6],y=nnd$MP), col="blue",lwd=1)+
+  geom_smooth(method=lm,aes(x=pr[,7],y=nnd$MP), col="blue",lwd=1)+
+  geom_smooth(method=lm,aes(x=pr[,8],y=nnd$MP), col="blue",lwd=1)+
+  geom_smooth(method=lm,aes(x=pr[,9],y=nnd$MP), col="blue",lwd=1)+
+  xlab("Predykcja regresji kwantylowej")+
+  ylab("Wartość ze zbioru")+
+  ggtitle("Wykres predykcji")
+```
+
+### Interpretacja
+
+```{r}
+summary(modrq,se="boot")
+
+```
+
+Zinterpretujemy wyniki otrzymane dla $\tau = 0.3$.
+
+Dla $\tau=0.3$, czyli dla pierwszych $30\%$ danych:
+
+Wzrost *X2P* na $1$ powoduje wzrost *MP* na $1.873$.
+
+Wzrost *X3P* na $1$ powoduje wzrost *MP* na $3.837$.
+
+Wzrost *STL* na $1$ powoduje wzrost *MP* na $5.209$.
+
+Wzrost *G* na $1$ powoduje wzrost *MP* na $0.04$.
+
+Wzrost *DRB* na $1$ powoduje wzrost *MP* na $1.616$.
+
+Wzrost *Age* na $1$ powoduje wzrost *MP* na $0.17$.
+
+Wzrost *eFG.* na $1$ powoduje spadek *MP* na $4.374$.
+
+# Podsumowanie
+
+Zbudowaliśmy 3 modeli opisujące badany związek. Reasumując otrzymane wyniki możemy zrobić wniosek, że mimo tego że predykcja modeli nie bardzo się różni, ale interpretacja modelu z transformowanymi zmiennymi jest tak trudna, że jest on najmniej możliwy do stosowania, w przypadku regresji kwantylowej jest nieco lepiej, ale najbardziej sensowną interpretacje otrzymujemy przy stosowaniu MARS.
+
+Do czego moglibyśmy zastosować taki model? Np., młody koszykarz mógłby, korzystając z tego modelu, wybierać jaki ze swoich umiejętności mu trzeba polepszyć, żeby otrzymywać więcej czasu na boisku za mecz.
