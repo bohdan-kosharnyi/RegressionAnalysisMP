@@ -1,4 +1,4 @@
-# AnalysisNBA
+# RegressionAnalysisMP
 ![GOAT](goat.jfif "GOAT")
 ## Wstęp
 
